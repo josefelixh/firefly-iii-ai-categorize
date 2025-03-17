@@ -45,26 +45,6 @@
     <section>
         <h2>Jobs</h2>
         <div id="mount"></div>
-<!--        <article class="job">-->
-<!--            <div><strong>Status:</strong> <span>queued</span></div>-->
-<!--            <div><strong>Created:</strong>-->
-<!--                <time>2023-05-21 15:50:00</time>-->
-<!--            </div>-->
-<!--            <div><strong>Webhook UUID:</strong> <span>34zrurjd-44df-we4dtfds</span></div>-->
-<!--            <div><strong>Destination name:</strong> <span>LIEFERANDO.DE LIEFERSERVI</span></div>-->
-<!--            <div><strong>Description:</strong> <span>LIEFERANDO.DE LIEFERSERVI; AMSTERDAM NL; KARTE 8338; 40010075001 16052023; KDN-REF 000000986464</span>-->
-<!--            </div>-->
-<!--            <div><strong>Prompt:</strong><br>-->
-<!--                <pre>Given i want to categorize transactions on my bank account into this categories: Bargeld, Gas, Haushalt, Kino, Lebensmittel, Lieferdienst, ÖPNV, Restaurants, Rundfunkbeitrag, Strom-->
-<!--In which category would a transaction from "LIEFERANDO.DE LIEFERSERVI" with the subject "LIEFERANDO.DE LIEFERSERVI; AMSTERDAM NL; KARTE 8338; 40010075001 16052023; KDN-REF 000000986464" fall into?-->
-<!--Just output the name of the category. Does not have to be a complete sentence.</pre>-->
-<!--            </div>-->
-<!--            <div><strong>Open AI's guess:</strong><br>-->
-<!--                <pre>-->
-<!--Lieferdienst-->
-<!--</pre>-->
-<!--            </div>-->
-<!--        </article>-->
     </section>
 </div>
 
@@ -75,8 +55,6 @@
     const mount = document.getElementById('mount');
 
     socket.on('jobs', jobs => {
-        console.log('jobs', jobs);
-
         jobs.sort((a, b) => {
             return new Date(b.created) - new Date(a.created);
         })
@@ -89,15 +67,12 @@
     });
 
     socket.on('job created', e => {
-        console.log('job created', e);
         const element = document.createElement('div');
         element.innerHTML = renderJob(e.job);
         mount.prepend(element);
     })
 
     socket.on('job updated', e => {
-        console.log('job updated', e)
-
         const element = document.createElement('div');
         element.innerHTML = renderJob(e.job);
 
@@ -119,17 +94,30 @@
             <div><strong>Destination name:</strong> <span>${job.data?.destinationName || ''}</span></div>
             <div><strong>Description:</strong> <span>${job.data?.description || ''}</span>
             <div><strong>Guessed category:</strong> <span>${job.data?.category ? job.data.category : '<em>Not yet classified</em>'}</span>
+            <div><strong>Guessed budget:</strong> <span>${job.data?.budget ? job.data.budget : '<em>Not yet budgeted</em>'}</span>
             </div>
-            ${ job.data?.prompt ? `<div><strong>Prompt:</strong><br>
+            ${ job.data?.prompt ? `<div><strong>Category Prompt:</strong><br>
                 <details>
                     <summary>Show</summary>
                     <pre>${job.data.prompt}</pre>
                 </details>
             </div>` : ''}
-            ${ job.data?.response ? `<div><strong>Open AI's response:</strong>
+            ${ job.data?.response ? `<div><strong>Category Open AI's response:</strong>
                  <details>
                     <summary>Show</summary>
                     <pre>${job.data.response}</pre>
+                 </details>
+            </div>` : ''}
+            ${ job.data?.budgetPrompt ? `<div><strong>Budget Prompt:</strong><br>
+                <details>
+                    <summary>Show</summary>
+                    <pre>${job.data.budgetPrompt}</pre>
+                </details>
+            </div>` : ''}
+            ${ job.data?.budgetResponse ? `<div><strong>Budget Open AI's response:</strong>
+                 <details>
+                    <summary>Show</summary>
+                    <pre>${job.data.budgetResponse}</pre>
                  </details>
             </div>` : ''}
         </article>`

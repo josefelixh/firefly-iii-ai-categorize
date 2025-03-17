@@ -1,11 +1,12 @@
 import express from "express";
-import {getConfigVariable} from "./util.js";
+import { getConfigVariable } from "./util.js";
 import FireflyService from "./FireflyService.js";
 import OpenAiService from "./OpenAiService.js";
-import {Server} from "socket.io";
+import { Server } from "socket.io";
 import * as http from "http";
 import Queue from "queue";
 import JobList from "./JobList.js";
+import logger from "./logger.js";
 
 export default class App {
     #PORT;
@@ -29,7 +30,7 @@ export default class App {
 
     async run() {
         this.#firefly = new FireflyService();
-        this.#openAi = new OpenAiService();
+        this.#openAi = new OpenAiService(this.#firefly);
 
         this.#queue = new Queue({
             timeout: 30 * 1000,
@@ -37,10 +38,15 @@ export default class App {
             autostart: true
         });
 
-        this.#queue.addEventListener('start', job => console.log('Job started', job))
-        this.#queue.addEventListener('success', event => console.log('Job success', event.job))
-        this.#queue.addEventListener('error', event => console.error('Job error', event.job, event.err, event))
-        this.#queue.addEventListener('timeout', event => console.log('Job timeout', event.job))
+        this.#queue.addEventListener('start', job => logger.debug("🚀 Job Started →", job));
+        this.#queue.addEventListener('success', event => logger.debug("✅ Job Completed Successfully →", event.job));
+        this.#queue.addEventListener('error', event => {
+            logger.error("🚨 Job Error!");
+            logger.error("🔍 Job Details:", event.job);
+            logger.error("❌ Error Message:", event.err?.message || "No error message");
+            logger.error("📜 Stack Trace:", event.err?.stack || "No stack trace");
+        });
+        this.#queue.addEventListener('timeout', event => logger.error('❌ Job timeout', event.job))
 
         this.#express = express();
         this.#server = http.createServer(this.#express)
@@ -59,23 +65,30 @@ export default class App {
         this.#express.post('/webhook', this.#onWebhook.bind(this))
 
         this.#server.listen(this.#PORT, async () => {
-            console.log(`Application running on port ${this.#PORT}`);
+            logger.info(`🚀 Application running on port ${this.#PORT}`);
         });
 
         this.#io.on('connection', socket => {
-            console.log('connected');
+            logger.debug('🔍 Socket connection');
             socket.emit('jobs', Array.from(this.#jobList.getJobs().values()));
         })
     }
 
     #onWebhook(req, res) {
         try {
-            console.info("Webhook triggered");
+            logger.info("🌐 Incoming Webhook Received!");
             this.#handleWebhook(req, res);
-            res.send("Queued");
+            res.status(202).send("Queued");
         } catch (e) {
-            console.error(e)
-            res.status(400).send(e.message);
+            logger.error("🚨 Webhook Processing Error:", e);
+
+            if (e instanceof WebhookException) {
+                logger.info("🚫 Skipping transaction:", e.message);
+                res.status(200).send(`Skipped: ${e.message}`);
+            } else {
+                logger.error("❌ Server Error:", e.message);
+                res.status(500).send("Internal Server Error. Check logs for details.");
+            }
         }
     }
 
@@ -98,24 +111,34 @@ export default class App {
             throw new WebhookException("No transactions are available in content.transactions");
         }
 
-        if (req.body.content.transactions[0].type !== "withdrawal") {
+
+        const transaction = req.body.content.transactions[0];
+
+        if (transaction.type !== "withdrawal") {
             throw new WebhookException("content.transactions[0].type has to be 'withdrawal'. Transaction will be ignored.");
         }
-
-        if (req.body.content.transactions[0].category_id !== null) {
-            throw new WebhookException("content.transactions[0].category_id is already set. Transaction will be ignored.");
+        // Ignore transactions that have the "pending" tag
+        if (transaction.tags && transaction.tags.includes("pending")) {
+            throw new WebhookException("Transaction has the 'pending' tag and will be ignored.");
         }
 
-        if (!req.body.content.transactions[0].description) {
+        const shouldCategorize = transaction.category_id === null || transaction.category_id === "";
+        const shouldBudget = transaction.budget_id === null || transaction.budget_id === "" || transaction.type != "withdrawal";
+
+        if (!shouldCategorize && !shouldBudget) {
+            throw new WebhookException("Transaction already has both category and budget set. It will be ignored.");
+        }
+
+        if (!transaction.description) {
             throw new WebhookException("Missing content.transactions[0].description");
         }
 
-        if (!req.body.content.transactions[0].destination_name) {
+        if (!transaction.destination_name) {
             throw new WebhookException("Missing content.transactions[0].destination_name");
         }
 
-        const destinationName = req.body.content.transactions[0].destination_name;
-        const description = req.body.content.transactions[0].description
+        const destinationName = transaction.destination_name;
+        const description = transaction.description
 
         const job = this.#jobList.createJob({
             destinationName,
@@ -123,24 +146,58 @@ export default class App {
         });
 
         this.#queue.push(async () => {
-            this.#jobList.setJobInProgress(job.id);
+            try {
+                logger.info("🛠️ Job started:", job.id, " | Should Categorize:", shouldCategorize, " | Should Budget:", shouldBudget);
+                this.#jobList.setJobInProgress(job.id);
 
-            const categories = await this.#firefly.getCategories();
+                const categories = await this.#firefly.getCategories();
+                const budgets = await this.#firefly.getBudgets();
+                logger.debug("📂 Categories retrieved:", categories);
+                logger.debug("📂 Budgets retrieved:", budgets);
 
-            const {category, prompt, response} = await this.#openAi.classify(Array.from(categories.keys()), destinationName, description)
+                const classification = await this.#openAi.classify(
+                    Array.from(categories.keys()), Array.from(budgets.keys()), transaction
+                ) || {};
 
-            const newData = Object.assign({}, job.data);
-            newData.category = category;
-            newData.prompt = prompt;
-            newData.response = response;
+                const category = classification.category || null;
+                const budget = classification.budget || null;
+                const prompt = classification.prompt || "";
+                const response = classification.response || "";
+                const budgetPrompt = classification.budgetPrompt || "";
+                const budgetResponse = classification.budgetResponse || "";
 
-            this.#jobList.updateJobData(job.id, newData);
+                logger.debug("🤖 OpenAI Response:", { category, budget, prompt, response, budgetPrompt, budgetResponse });
 
-            if (category) {
-                await this.#firefly.setCategory(req.body.content.id, req.body.content.transactions, categories.get(category));
+                const categoryToSet = shouldCategorize && category && category !== "Neither" ? categories.get(category) : null;
+                const budgetToSet = shouldBudget && budget && budget !== "No Budget" ? budgets.get(budget) : null;
+
+                if (categoryToSet || budgetToSet) {
+                    logger.info("📝 Updating Firefly transaction...");
+                    await this.#firefly.setCategoryAndBudget(
+                        req.body.content.id,
+                        req.body.content.transactions,
+                        categoryToSet,
+                        budgetToSet
+                    );
+                } else {
+                    logger.info("🚫 No updates needed for Firefly.");
+                }
+
+                const newData = Object.assign({}, job.data);
+                newData.category = category;
+                newData.budget = budget;
+                newData.prompt = prompt;
+                newData.response = response;
+                newData.budgetPrompt = budgetPrompt;
+                newData.budgetResponse = budgetResponse;
+                this.#jobList.updateJobData(job.id, newData);
+
+                this.#jobList.setJobFinished(job.id);
+                logger.info("✅ Job Finished:", job.id);
+            } catch (error) {
+                logger.error("🚨 Job Processing Error:", error);
+                throw error; // Ensure the queue catches and logs the error
             }
-
-            this.#jobList.setJobFinished(job.id);
         });
     }
 }
